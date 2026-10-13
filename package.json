@@ -1,0 +1,25 @@
+{
+  "name": "visage",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "pnpm -r --if-present test",
+    "dev": "pnpm --filter ./apps/playground dev",
+    "build": "pnpm --filter @visage/core build && pnpm --filter @visage/browser build && pnpm --filter ./apps/playground build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "lint": "pnpm -r --if-present lint"
+  },  
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.11.2",
+      "onFail": "download"
+    }
+  },
+  "packageManager": "pnpm@12.11.2",
+  "type": "module"  
+}
