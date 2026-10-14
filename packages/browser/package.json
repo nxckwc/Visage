@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@visage/core": "workspace:*"
+    "@visage/core": "workspace:*",
+    "onnxruntime-web": "^1.30.0"
   },
   "devDependencies": {
     "typescript": "^7.0.2"

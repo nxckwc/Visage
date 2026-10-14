@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test": "pnpm --filter @visage/core exec vitest run --root ../../apps/playground tests",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
     "@visage/browser": "workspace:*",
+    "onnxruntime-web": "^1.30.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

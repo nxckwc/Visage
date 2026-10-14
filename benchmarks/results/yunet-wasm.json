@@ -1,0 +1,41 @@
+
+{
+  "model": "YuNet 2023mar",
+  "runtime": "onnxruntime-web",
+  "backend": "wasm",
+  "threads": 1,
+  "inputShape": [1, 3, 640, 640],
+  "warmupRuns": 5,
+  "measuredRuns": 30,
+  "input": "single frozen webcam frame",
+  "facesDetected": 1,
+  "units": "ms",
+  "preprocessing": {
+    "average": 10.6,
+    "median": 9.9,
+    "min": 7.9,
+    "p95": 14.4,
+    "max": 18.8
+  },
+  "inference": {
+    "average": 77.6,
+    "median": 72.9,
+    "min": 68.1,
+    "p95": 95.6,
+    "max": 110.7
+  },
+  "decoding": {
+    "average": 0.7,
+    "median": 0.2,
+    "min": 0.0,
+    "p95": 3.3,
+    "max": 4.8
+  },
+  "total": {
+    "average": 88.9,
+    "median": 84.9,
+    "min": 76.6,
+    "p95": 104.3,
+    "max": 125.1
+  }
+}
