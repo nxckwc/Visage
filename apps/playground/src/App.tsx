@@ -5,7 +5,13 @@ import { runBenchmark, type BenchmarkResult } from "./benchmark";
 import { BenchmarkResults } from "./components/BenchmarkResults";
 import { YuNetDetector } from "./detectors/yunet";
 import { SCRFDDetector } from "./detectors/scrfd";
+import { BlazeFaceLandmarkPipeline } from "./detectors/landmarkPipeline";
+import {
+  BlazeFaceShortRangeDetector,
+  MediaPipeLandmarkDetector,
+} from "./detectors/blazeface";
 import type { DetectedFace, DetectorTimings, FaceDetector } from "./detectors/types";
+import { drawFaces, smoothFaces } from "./detectionOverlay";
 
 const THREAD_COUNT = 1;
 const WARMUP_RUNS = 5;
@@ -14,89 +20,17 @@ const MEASURED_RUNS = 30;
 const DETECTOR_NAMES = {
   yunet: "YuNet",
   scrfd: "SCRFD-500M",
+  blazeface: "MediaPipe BlazeFace Short Range (6 landmarks)",
+  mediapipe: "BlazeFace → MediaPipe 468 landmarks",
 } as const;
 
 type ModelId = keyof typeof DETECTOR_NAMES;
-
-type PoseIndicators = {
-  rollDegrees: number;
-  yawIndex: number;
-  pitchRatio: number;
-};
 
 type FrameResult = {
   faceCount: number;
   confidence: number;
   timings: DetectorTimings;
-  pose: PoseIndicators | null;
 };
-
-function estimatePose(face: DetectedFace): PoseIndicators | null {
-  if (face.landmarks.length < 5) return null;
-
-  const [eyeA, eyeB, nose, mouthA, mouthB] = face.landmarks;
-  const eyeDx = eyeB.x - eyeA.x;
-  const eyeDy = eyeB.y - eyeA.y;
-  const eyeDistance = Math.hypot(eyeDx, eyeDy);
-  if (eyeDistance < 1) return null;
-
-  const eyeCenter = {
-    x: (eyeA.x + eyeB.x) / 2,
-    y: (eyeA.y + eyeB.y) / 2,
-  };
-  const mouthCenter = {
-    x: (mouthA.x + mouthB.x) / 2,
-    y: (mouthA.y + mouthB.y) / 2,
-  };
-
-  // Rotate into an eye-aligned coordinate system. This reduces
-  // interference from in-plane head roll.
-  const ux = eyeDx / eyeDistance;
-  const uy = eyeDy / eyeDistance;
-  const vx = -uy;
-  const vy = ux;
-
-  const noseX = (nose.x - eyeCenter.x) * ux + (nose.y - eyeCenter.y) * uy;
-  const eyeToNoseY = (nose.x - eyeCenter.x) * vx + (nose.y - eyeCenter.y) * vy;
-  const noseToMouthY =
-    (mouthCenter.x - nose.x) * vx + (mouthCenter.y - nose.y) * vy;
-
-  return {
-    rollDegrees: (Math.atan2(eyeDy, eyeDx) * 180) / Math.PI,
-    yawIndex: (2 * noseX) / eyeDistance,
-    pitchRatio:
-      Math.abs(noseToMouthY) > 0.001
-        ? eyeToNoseY / noseToMouthY
-        : Number.NaN,
-  };
-}
-
-function drawFaces(
-  context: CanvasRenderingContext2D,
-  faces: DetectedFace[]
-): void {
-  context.lineWidth = 3;
-  context.font = "16px monospace";
-
-  for (const face of faces) {
-    context.strokeStyle = "#00ff88";
-    context.strokeRect(face.x, face.y, face.width, face.height);
-
-    context.fillStyle = "#00ff88";
-    context.fillText(
-      `${(face.confidence * 100).toFixed(1)}%`,
-      face.x,
-      Math.max(16, face.y - 6)
-    );
-
-    for (const point of face.landmarks) {
-      context.beginPath();
-      context.arc(point.x, point.y, 4, 0, Math.PI * 2);
-      context.fillStyle = "#ff4444";
-      context.fill();
-    }
-  }
-}
 
 function summarizeDetection(
   faces: DetectedFace[],
@@ -110,7 +44,6 @@ function summarizeDetection(
     faceCount: faces.length,
     confidence: best.confidence,
     timings,
-    pose: estimatePose(best),
   };
 }
 
@@ -129,7 +62,7 @@ export default function App() {
   const benchmarkActiveRef = useRef(false);
 
   const [selectedModel, setSelectedModel] = useState<ModelId>("yunet");
-  const [status, setStatus] = useState("Ready");
+  const [status, setStatus] = useState("Idle");
   const [isTracking, setIsTracking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [liveResult, setLiveResult] = useState<FrameResult | null>(null);
@@ -158,6 +91,11 @@ export default function App() {
     const detectors: Record<ModelId, FaceDetector> = {
       yunet: new YuNetDetector(),
       scrfd: new SCRFDDetector(),
+      blazeface: new BlazeFaceShortRangeDetector(),
+      mediapipe: new BlazeFaceLandmarkPipeline(
+        new BlazeFaceShortRangeDetector(),
+        new MediaPipeLandmarkDetector()
+      ),
     };
     detectorsRef.current = detectors;
     mountedRef.current = true;
@@ -219,7 +157,8 @@ export default function App() {
         overlay.height = canvas.height;
       }
 
-      setStatus("Tracking faces live...");
+      let previousFaces: DetectedFace[] = [];
+      setStatus("Detection active");
       while (trackingRef.current && generation === generationRef.current) {
         context.drawImage(video, 0, 0, canvas.width, canvas.height);
         const frame = context.getImageData(0, 0, canvas.width, canvas.height);
@@ -227,14 +166,16 @@ export default function App() {
 
         if (!trackingRef.current || generation !== generationRef.current) return;
 
+        const displayFaces = smoothFaces(previousFaces, faces);
+        previousFaces = displayFaces;
         const overlayContext = overlayRef.current?.getContext("2d");
         if (overlayContext) {
           overlayContext.clearRect(0, 0, canvas.width, canvas.height);
-          drawFaces(overlayContext, faces);
+          drawFaces(overlayContext, displayFaces);
         }
 
         setLiveResult(summarizeDetection(faces, timings));
-        setStatus(faces.length ? `Tracking ${faces.length} face(s)` : "Searching for faces...");
+        setStatus(faces.length ? `Detected ${faces.length} face(s)` : "No detections");
 
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       }
@@ -268,7 +209,7 @@ export default function App() {
     setFrozenResult(null);
     setBenchmarkResults(null);
     setBenchmarkProgress(0);
-    setStatus("Starting camera...");
+    setStatus("Starting camera");
 
     const task = trackCamera(detector, generation);
     captureTaskRef.current = task;
@@ -282,7 +223,7 @@ export default function App() {
     const detector = detectorsRef.current?.[selectedModel];
     const video = videoRef.current;
     if (!detector || !video || video.readyState < 2) {
-      setStatus("Wait for the camera to start");
+      setStatus("Camera is not ready");
       return;
     }
 
@@ -292,7 +233,7 @@ export default function App() {
     canvas.height = video.videoHeight;
     const context = canvas.getContext("2d", { willReadFrequently: true });
     if (!context || !canvas.width || !canvas.height) {
-      setStatus("Could not freeze camera frame");
+      setStatus("Frame capture failed");
       return;
     }
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -308,7 +249,7 @@ export default function App() {
     // Stop camera immediately, then wait for any in-flight detect()
     // before starting the benchmark on the same detector session.
     stopTracking();
-    setStatus("Frame frozen. Waiting for active inference...");
+    setStatus("Frame captured; waiting for inference");
 
     try {
       await captureTaskRef.current;
@@ -346,7 +287,7 @@ export default function App() {
 
       if (mountedRef.current && !controller.signal.aborted) {
         setBenchmarkResults(results);
-        setStatus("Benchmark complete — camera stopped");
+        setStatus("Benchmark complete");
       }
     } catch (error) {
       if (mountedRef.current && !controller.signal.aborted) {
@@ -362,104 +303,104 @@ export default function App() {
     }
   }
 
-  const livePose = liveResult?.pose;
-  const displayed = frozenResult ?? liveResult;
+  const currentResult = isTracking ? liveResult : frozenResult ?? liveResult;
 
   return (
-    <main style={{ padding: 32, maxWidth: 900, margin: "auto" }}>
-      <h1>Visage Playground</h1>
-      <h2>Live face tracking and pose indicators</h2>
+    <main className="playground">
+      <header className="page-header">
+        <h1 className="page-title">Face detection</h1>
+        <span className={`session-status ${isTracking ? "is-live" : busy ? "is-busy" : ""}`}>
+          <span className="status-dot" />
+          {busy ? "Benchmark running" : isTracking ? "Camera live" : "Idle"}
+        </span>
+      </header>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-        <label htmlFor="model">Model</label>
-        <select
-          id="model"
-          value={selectedModel}
-          disabled={isTracking || busy || Boolean(captureTaskRef.current)}
-          onChange={(event) => {
-            setSelectedModel(event.target.value as ModelId);
-            setLiveResult(null);
-            setFrozenResult(null);
-            setBenchmarkResults(null);
-            setStatus("Ready");
-          }}
-        >
-          {Object.entries(DETECTOR_NAMES).map(([id, name]) => (
-            <option key={id} value={id}>{name}</option>
-          ))}
-        </select>
+      <div className="page-content" id="playground">
+        <section className="camera-panel" aria-labelledby="camera-title">
+          <div className="camera-toolbar">
+            <div className="camera-heading">
+              <h2 id="camera-title">Camera input</h2>
+              <span className={`live-indicator ${isTracking ? "is-live" : ""}`}>
+                <span className="status-dot" />{isTracking ? "LIVE" : busy ? "RUNNING" : "IDLE"}
+              </span>
+            </div>
+            <div className="camera-controls">
+              <label className="visually-hidden" htmlFor="model">Detection model</label>
+              <select
+                id="model"
+                value={selectedModel}
+                disabled={isTracking || busy}
+                onChange={(event) => {
+                  setSelectedModel(event.target.value as ModelId);
+                  setLiveResult(null);
+                  setFrozenResult(null);
+                  setBenchmarkResults(null);
+                  setStatus("Idle");
+                }}
+              >
+                {Object.entries(DETECTOR_NAMES).map(([id, name]) => (
+                  <option key={id} value={id}>{name}</option>
+                ))}
+              </select>
+              {isTracking ? (
+                <button className="button button-secondary" onClick={stopTracking} disabled={busy}>Stop</button>
+              ) : (
+                <button className="button button-primary" onClick={startCamera} disabled={busy}>
+                  <span aria-hidden="true">▶</span> Start camera
+                </button>
+              )}
+              <button className="button button-benchmark" onClick={() => void bulkTest()} disabled={!isTracking || busy}>
+                {busy ? `Benchmarking ${benchmarkProgress}/${MEASURED_RUNS}` : "Run benchmark"}
+              </button>
+            </div>
+          </div>
 
-        <button onClick={startCamera} disabled={isTracking || busy}>
-          Start Camera
-        </button>
-        <button onClick={stopTracking} disabled={!isTracking || busy}>
-          Stop
-        </button>
-        <button onClick={() => void bulkTest()} disabled={!isTracking || busy}>
-          {busy ? `Benchmarking ${benchmarkProgress}/${MEASURED_RUNS}` : "Bulk Test (30×)"}
-        </button>
-      </div>
+          <div className={`camera-stage ${isTracking || frozenResult ? "camera-active" : ""}`}>
+            <video ref={videoRef} autoPlay muted playsInline className={isTracking ? "camera-media visible" : "camera-media"} />
+            <canvas ref={overlayRef} className={isTracking ? "camera-overlay visible" : "camera-overlay"} />
+            <canvas ref={frozenCanvasRef} className={!isTracking && frozenResult ? "camera-frozen visible" : "camera-frozen"} />
+            {!isTracking && !frozenResult && (
+              <div className="camera-empty">
+                <strong>No frame</strong>
+              </div>
+            )}
+            <div className="camera-stage-footer">
+              <span><span className={`status-dot ${isTracking ? "is-live" : ""}`} />{status}</span>
+              <span>Local processing · frames not stored</span>
+            </div>
+          </div>
 
-      <p>Status: {status}</p>
-
-      <div style={{ position: "relative", width: "100%", marginTop: 12 }}>
-        <video
-          ref={videoRef}
-          autoPlay
-          muted
-          playsInline
-          style={{ display: isTracking ? "block" : "none", width: "100%" }}
-        />
-        <canvas
-          ref={overlayRef}
-          style={{
-            display: isTracking ? "block" : "none",
-            position: "absolute",
-            inset: 0,
-            width: "100%",
-            height: "100%",
-            pointerEvents: "none",
-          }}
-        />
-        <canvas
-          ref={frozenCanvasRef}
-          style={{ display: !isTracking && frozenResult ? "block" : "none", width: "100%" }}
-        />
-      </div>
-
-      {isTracking && (
-        <section>
-          <h3>Live pose (landmark-based estimates)</h3>
-          <p>Roll: {livePose ? `${livePose.rollDegrees.toFixed(1)}°` : "—"}</p>
-          <p>Yaw asymmetry: {livePose ? livePose.yawIndex.toFixed(3) : "—"}</p>
-          <p>Pitch ratio: {livePose && Number.isFinite(livePose.pitchRatio)
-            ? livePose.pitchRatio.toFixed(3) : "—"}</p>
-          <p>Faces: {liveResult?.faceCount ?? 0}</p>
-          <p style={{ fontSize: 13 }}>
-            Yaw and pitch are <strong>uncalibrated geometric indicators</strong>, not 3D angles.
-            Their sign depends on landmark order and camera orientation.
-          </p>
+          <div className="live-stats" aria-live="polite">
+            <div><span>Faces detected</span><strong>{currentResult?.faceCount ?? "—"}</strong></div>
+            <div><span>Best confidence</span><strong>{currentResult ? `${(currentResult.confidence * 100).toFixed(1)}%` : "—"}</strong></div>
+            <div><span>Inference time</span><strong>{currentResult ? <>{currentResult.timings.inferenceMs.toFixed(1)}<small> ms</small></> : "—"}</strong></div>
+            <div className="selected-model"><span>Model</span><strong>{DETECTOR_NAMES[selectedModel]} <small>· WASM</small></strong></div>
+          </div>
         </section>
-      )}
 
-      {!isTracking && frozenResult && (
-        <section>
-          <h3>Frozen frame</h3>
-          <p>Faces: {frozenResult.faceCount}</p>
-          <p>Detection confidence: {(frozenResult.confidence * 100).toFixed(1)}%</p>
-          <p>Roll: {frozenResult.pose?.rollDegrees.toFixed(1) ?? "—"}°</p>
-          <p>Yaw asymmetry: {frozenResult.pose?.yawIndex.toFixed(3) ?? "—"}</p>
-          <p>Pitch ratio: {frozenResult.pose && Number.isFinite(frozenResult.pose.pitchRatio)
-            ? frozenResult.pose.pitchRatio.toFixed(3) : "—"}</p>
-          <p>Preprocess: {frozenResult.timings.preprocessingMs.toFixed(1)} ms</p>
-          <p>Inference: {frozenResult.timings.inferenceMs.toFixed(1)} ms</p>
-          <p>Decode: {frozenResult.timings.decodingMs.toFixed(1)} ms</p>
+        <section className="report-section" id="report" aria-labelledby="report-heading">
+          <div className="section-heading">
+            <div><h2 id="report-heading">Benchmark</h2><p>30 measured runs · 5 warm-up runs excluded.</p></div>
+          </div>
+          {benchmarkResults ? (
+            <BenchmarkResults result={benchmarkResults} />
+          ) : (
+            <div className="report-placeholder">
+              {busy ? (
+                <>
+                  <div className="progress-track" role="progressbar" aria-label="Benchmark progress" aria-valuemin={0} aria-valuemax={MEASURED_RUNS} aria-valuenow={benchmarkProgress}>
+                    <span style={{ width: `${(benchmarkProgress / MEASURED_RUNS) * 100}%` }} />
+                  </div>
+                  <span>Measuring frame · {benchmarkProgress} of {MEASURED_RUNS} runs</span>
+                </>
+              ) : (
+                <span>Run benchmark to record latency and stage timings.</span>
+              )}
+            </div>
+          )}
         </section>
-      )}
 
-      {benchmarkResults && <BenchmarkResults result={benchmarkResults} />}
-      {!isTracking && busy && <p>Benchmark progress: {benchmarkProgress}/{MEASURED_RUNS}</p>}
-      {displayed && !isTracking && !frozenResult && <p>Camera stopped.</p>}
+      </div>
     </main>
   );
 }

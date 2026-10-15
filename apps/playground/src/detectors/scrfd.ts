@@ -65,6 +65,9 @@ export class SCRFDDetector implements FaceDetector {
   private activeDetection: Promise<DetectionResult> | null = null;
   private disposePromise: Promise<void> | null = null;
   private disposed = false;
+  private sourceCanvas: HTMLCanvasElement | null = null;
+  private modelCanvas: HTMLCanvasElement | null = null;
+  private inputData: Float32Array | null = null;
 
   async load(): Promise<void> {
     if (this.disposed) {
@@ -129,19 +132,22 @@ export class SCRFDDetector implements FaceDetector {
   private async detectInternal(
     image: ImageData
   ): Promise<DetectionResult> {
-    const session = this.session!;
+    if (image.width <= 0 || image.height <= 0) {
+      throw new Error("Image dimensions must be positive");
+    }
+    const session = this.session;
+    if (!session) throw new Error("SCRFD is not loaded");
 
     const preprocessStart = performance.now();
 
-    const canvas = document.createElement("canvas");
-    canvas.width = SIZE;
-    canvas.height = SIZE;
-
-    const ctx = canvas.getContext("2d", {
+    const modelCanvas = this.modelCanvas ??= document.createElement("canvas");
+    if (modelCanvas.width !== SIZE) modelCanvas.width = SIZE;
+    if (modelCanvas.height !== SIZE) modelCanvas.height = SIZE;
+    const modelContext = modelCanvas.getContext("2d", {
       willReadFrequently: true,
     });
 
-    if (!ctx) throw new Error("Canvas unavailable");
+    if (!modelContext) throw new Error("Could not initialize SCRFD model canvas");
 
     const scale = Math.min(
       SIZE / image.width,
@@ -154,25 +160,22 @@ export class SCRFDDetector implements FaceDetector {
     const offsetX = (SIZE - width) / 2;
     const offsetY = (SIZE - height) / 2;
 
-    const source = document.createElement("canvas");
-    source.width = image.width;
-    source.height = image.height;
+    const sourceCanvas = this.sourceCanvas ??= document.createElement("canvas");
+    if (sourceCanvas.width !== image.width) sourceCanvas.width = image.width;
+    if (sourceCanvas.height !== image.height) sourceCanvas.height = image.height;
+    const sourceContext = sourceCanvas.getContext("2d", {
+      willReadFrequently: true,
+    });
+    if (!sourceContext) throw new Error("Could not initialize SCRFD source canvas");
 
-    const sourceCtx = source.getContext("2d");
+    sourceContext.putImageData(image, 0, 0);
+    modelContext.fillStyle = "black";
+    modelContext.fillRect(0, 0, SIZE, SIZE);
+    modelContext.drawImage(sourceCanvas, offsetX, offsetY, width, height);
 
-    if (!sourceCtx) {
-      throw new Error("Source canvas unavailable");
-    }
-
-    sourceCtx.putImageData(image, 0, 0);
-
-    ctx.fillStyle = "black";
-    ctx.fillRect(0, 0, SIZE, SIZE);
-    ctx.drawImage(source, offsetX, offsetY, width, height);
-
-    const rgba = ctx.getImageData(0, 0, SIZE, SIZE).data;
+    const rgba = modelContext.getImageData(0, 0, SIZE, SIZE).data;
     const pixels = SIZE * SIZE;
-    const data = new Float32Array(3 * pixels);
+    const data = this.inputData ??= new Float32Array(3 * pixels);
 
     // SCRFD expects RGB, CHW, normalized using
     // (pixel - 127.5) / 128.
@@ -215,10 +218,8 @@ export class SCRFDDetector implements FaceDetector {
       const toSourceY = (y: number) =>
         (y - offsetY) / scale;
 
-      const clamp = (
-        value: number,
-        max: number
-      ) => Math.max(0, Math.min(max, value));
+      const clamp = (value: number, max: number) =>
+        Math.max(0, Math.min(max, value));
 
       const strides = [8, 16, 32];
 
@@ -230,19 +231,31 @@ export class SCRFDDetector implements FaceDetector {
         const stride = strides[level];
         const gridWidth = SIZE / stride;
 
-        const scores = outputs[scoreNames[level]]
-          .data as Float32Array;
+        const scoreOutput = outputs[scoreNames[level]];
+        const boxOutput = outputs[boxNames[level]];
+        const landmarkOutput = outputs[landmarkNames[level]];
+        if (!scoreOutput || !boxOutput || !landmarkOutput) {
+          throw new Error(`SCRFD output tensors are missing for stride ${stride}`);
+        }
+        if (
+          !(scoreOutput.data instanceof Float32Array) ||
+          !(boxOutput.data instanceof Float32Array) ||
+          !(landmarkOutput.data instanceof Float32Array)
+        ) {
+          throw new Error(`SCRFD output tensors have an unexpected type for stride ${stride}`);
+        }
 
-        const boxes = outputs[boxNames[level]]
-          .data as Float32Array;
-
-        const keypoints = outputs[landmarkNames[level]]
-          .data as Float32Array;
+        const scores = scoreOutput.data;
+        const boxes = boxOutput.data;
+        const keypoints = landmarkOutput.data;
+        if (boxes.length < scores.length * 4 || keypoints.length < scores.length * 10) {
+          throw new Error(`SCRFD output tensor shapes do not match for stride ${stride}`);
+        }
 
         for (let i = 0; i < scores.length; i++) {
           const confidence = scores[i];
 
-          if (confidence < THRESHOLD) continue;
+          if (!Number.isFinite(confidence) || confidence < THRESHOLD) continue;
 
           // Two anchors per feature-map position.
           const gridIndex = Math.floor(i / 2);
@@ -269,6 +282,7 @@ export class SCRFDDetector implements FaceDetector {
           const y2 = toSourceY(
             anchorY + boxes[b + 3] * stride
           );
+          if (![x1, y1, x2, y2].every(Number.isFinite)) continue;
 
           const x = clamp(x1, image.width);
           const y = clamp(y1, image.height);
@@ -278,21 +292,21 @@ export class SCRFDDetector implements FaceDetector {
 
           if (right <= x || bottom <= y) continue;
 
-          const landmarks = Array.from(
-            { length: 5 },
-            (_, j) => {
-              const k = i * 10 + j * 2;
-
-              return {
-                x: toSourceX(
-                  anchorX + keypoints[k] * stride
-                ),
-                y: toSourceY(
-                  anchorY + keypoints[k + 1] * stride
-                ),
-              };
+          const landmarks: DetectedFace["landmarks"] = [];
+          for (let j = 0; j < 5; j++) {
+            const k = i * 10 + j * 2;
+            const modelX = anchorX + keypoints[k] * stride;
+            const modelY = anchorY + keypoints[k + 1] * stride;
+            if (!Number.isFinite(modelX) || !Number.isFinite(modelY)) {
+              landmarks.length = 0;
+              break;
             }
-          );
+            landmarks.push({
+              x: clamp(toSourceX(modelX), image.width),
+              y: clamp(toSourceY(modelY), image.height),
+            });
+          }
+          if (landmarks.length !== 5) continue;
 
           faces.push({
             x,
@@ -347,6 +361,9 @@ export class SCRFDDetector implements FaceDetector {
         await this.session.release();
         this.session = null;
       }
+      this.sourceCanvas = null;
+      this.modelCanvas = null;
+      this.inputData = null;
     })();
 
     return this.disposePromise;

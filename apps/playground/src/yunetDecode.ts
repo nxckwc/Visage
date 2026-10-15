@@ -18,6 +18,18 @@ type Transform = {
   sourceHeight: number;
 };
 
+function readOutput(
+  outputs: Record<string, ort.Tensor>,
+  name: string
+): Float32Array {
+  const output = outputs[name];
+  if (!output) throw new Error(`YuNet output tensor "${name}" is missing`);
+  if (!(output.data instanceof Float32Array)) {
+    throw new Error(`YuNet output tensor "${name}" has an unexpected type`);
+  }
+  return output.data;
+}
+
 function iou(a: Face, b: Face): number {
   const left = Math.max(a.x, b.x);
   const top = Math.max(a.y, b.y);
@@ -39,6 +51,15 @@ export function decodeYuNet(
   confidenceThreshold = 0.6,
   nmsThreshold = 0.3
 ): Face[] {
+  if (
+    !Number.isFinite(transform.scale) ||
+    transform.scale <= 0 ||
+    transform.sourceWidth <= 0 ||
+    transform.sourceHeight <= 0
+  ) {
+    throw new Error("YuNet transform dimensions must be positive");
+  }
+
   const candidates: Face[] = [];
 
   const toOriginalX = (x: number) =>
@@ -48,14 +69,22 @@ export function decodeYuNet(
     (y - transform.offsetY) / transform.scale;
 
   for (const stride of [8, 16, 32]) {
-    const cls = outputs[`cls_${stride}`].data as Float32Array;
-    const obj = outputs[`obj_${stride}`].data as Float32Array;
-    const bbox = outputs[`bbox_${stride}`].data as Float32Array;
-    const kps = outputs[`kps_${stride}`].data as Float32Array;
+    const cls = readOutput(outputs, `cls_${stride}`);
+    const obj = readOutput(outputs, `obj_${stride}`);
+    const bbox = readOutput(outputs, `bbox_${stride}`);
+    const kps = readOutput(outputs, `kps_${stride}`);
+    if (
+      obj.length < cls.length ||
+      bbox.length < cls.length * 4 ||
+      kps.length < cls.length * 10
+    ) {
+      throw new Error(`YuNet output tensor shapes do not match for stride ${stride}`);
+    }
 
     const featureWidth = 640 / stride;
 
     for (let i = 0; i < cls.length; i++) {
+      if (!Number.isFinite(cls[i]) || !Number.isFinite(obj[i])) continue;
       const score = Math.sqrt(
         Math.max(0, Math.min(1, cls[i])) *
         Math.max(0, Math.min(1, obj[i]))
@@ -70,6 +99,7 @@ export function decodeYuNet(
       const cy = (row + bbox[i * 4 + 1]) * stride;
       const width = Math.exp(bbox[i * 4 + 2]) * stride;
       const height = Math.exp(bbox[i * 4 + 3]) * stride;
+      if (![cx, cy, width, height].every(Number.isFinite)) continue;
 
       const x1 = toOriginalX(cx - width / 2);
       const y1 = toOriginalY(cy - height / 2);
@@ -83,14 +113,20 @@ export function decodeYuNet(
 
       if (right <= x || bottom <= y) continue;
 
-      const landmarks = Array.from({ length: 5 }, (_, k) => ({
-        x: toOriginalX(
-          (col + kps[i * 10 + k * 2]) * stride
-        ),
-        y: toOriginalY(
-          (row + kps[i * 10 + k * 2 + 1]) * stride
-        ),
-      }));
+      const landmarks = Array.from({ length: 5 }, (_, k) => {
+        const modelX = (col + kps[i * 10 + k * 2]) * stride;
+        const modelY = (row + kps[i * 10 + k * 2 + 1]) * stride;
+        if (!Number.isFinite(modelX) || !Number.isFinite(modelY)) {
+          return { x: Number.NaN, y: Number.NaN };
+        }
+        return {
+          x: Math.max(0, Math.min(transform.sourceWidth, toOriginalX(modelX))),
+          y: Math.max(0, Math.min(transform.sourceHeight, toOriginalY(modelY))),
+        };
+      });
+      if (landmarks.some(({ x, y }) => !Number.isFinite(x) || !Number.isFinite(y))) {
+        continue;
+      }
 
       candidates.push({
         x,
