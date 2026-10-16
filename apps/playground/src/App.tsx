@@ -3,6 +3,8 @@ import * as ort from "onnxruntime-web";
 
 import { runBenchmark, type BenchmarkResult } from "./benchmark";
 import { BenchmarkResults } from "./components/BenchmarkResults";
+import { FaceRegister } from "./components/FaceRegister";
+import { FaceRecognition } from "./components/FaceRecognition";
 import { YuNetDetector } from "./detectors/yunet";
 import { SCRFDDetector } from "./detectors/scrfd";
 import { BlazeFaceLandmarkPipeline } from "./detectors/landmarkPipeline";
@@ -25,6 +27,7 @@ const DETECTOR_NAMES = {
 } as const;
 
 type ModelId = keyof typeof DETECTOR_NAMES;
+type TabId = "detection" | "registration" | "recognition";
 
 type FrameResult = {
   faceCount: number;
@@ -62,6 +65,7 @@ export default function App() {
   const benchmarkActiveRef = useRef(false);
 
   const [selectedModel, setSelectedModel] = useState<ModelId>("yunet");
+  const [activeTab, setActiveTab] = useState<TabId>("detection");
   const [status, setStatus] = useState("Idle");
   const [isTracking, setIsTracking] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -306,16 +310,27 @@ export default function App() {
   const currentResult = isTracking ? liveResult : frozenResult ?? liveResult;
 
   return (
-    <main className="playground">
+    <div className="app-shell">
+      <aside className="app-sidebar" aria-label="Main navigation">
+        <a className="brand-mark" href="#playground" aria-label="Visage home"><span className="brand-icon">V</span><span>visage</span></a>
+        <span className="sidebar-label">PLAYGROUND</span>
+        <nav className="sidebar-nav">
+          <button className={`nav-item ${activeTab === "detection" ? "is-active" : ""}`} onClick={() => { if (isTracking) stopTracking(); setActiveTab("detection"); }}><span className="nav-icon">◎</span><span>Face detection</span></button>
+          <button className={`nav-item ${activeTab === "registration" ? "is-active" : ""}`} onClick={() => { if (isTracking) stopTracking(); setActiveTab("registration"); }}><span className="nav-icon">▤</span><span>Face register</span><span className="nav-badge">NEW</span></button>
+          <button className={`nav-item ${activeTab === "recognition" ? "is-active" : ""}`} onClick={() => { if (isTracking) stopTracking(); setActiveTab("recognition"); }}><span className="nav-icon">◎</span><span>Face recognition</span></button>
+        </nav>
+        <div className="sidebar-footer"><span className="sidebar-footer-mark">●</span><span>Local AI playground<small>Models run in your browser</small></span></div>
+      </aside>
+      <main className="playground">
       <header className="page-header">
-        <h1 className="page-title">Face detection</h1>
-        <span className={`session-status ${isTracking ? "is-live" : busy ? "is-busy" : ""}`}>
+        <div><span className="page-kicker">VISAGE / PLAYGROUND</span><h1 className="page-title">{activeTab === "detection" ? "Face detection" : activeTab === "registration" ? "Face register" : "Face recognition"}</h1></div>
+        <span className={`session-status ${activeTab === "detection" && isTracking ? "is-live" : busy ? "is-busy" : ""}`}>
           <span className="status-dot" />
-          {busy ? "Benchmark running" : isTracking ? "Camera live" : "Idle"}
+          {activeTab === "registration" ? "Ready" : busy ? "Benchmark running" : isTracking ? "Camera live" : "Idle"}
         </span>
       </header>
 
-      <div className="page-content" id="playground">
+      {activeTab === "registration" ? <div className="page-content register-content" id="playground"><div className="view-intro"><div><p className="eyebrow">IDENTITY WORKSPACE</p><h2>Build your face register</h2><p>Capture a face, give it a name, and keep its recognition data on this device. Face crops are now aligned using eye landmarks; previously registered faces need to be added again.</p></div><span className="privacy-chip"><span className="online-dot" /> PRIVATE BY DESIGN</span></div><FaceRegister detectors={detectorsRef.current!} /></div> : activeTab === "recognition" ? <FaceRecognition detectors={detectorsRef.current!} /> : <div className="page-content" id="playground">
         <section className="camera-panel" aria-labelledby="camera-title">
           <div className="camera-toolbar">
             <div className="camera-heading">
@@ -401,6 +416,8 @@ export default function App() {
         </section>
 
       </div>
-    </main>
+      }
+      </main>
+    </div>
   );
 }

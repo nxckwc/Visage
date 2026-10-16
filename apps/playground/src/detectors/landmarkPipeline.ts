@@ -111,7 +111,7 @@ export class BlazeFaceLandmarkPipeline implements FaceDetector {
 
   private async detectFrame(image: ImageData) {
     const firstStage = await this.aligner.detect(image);
-    const timings = { ...firstStage.timings };
+    const timings = { ...firstStage.timings, landmarkInferenceMs: 0 };
     const candidates = firstStage.faces.filter((face) =>
       Number.isFinite(face.confidence) && face.confidence >= MIN_ALIGNMENT_CONFIDENCE
     );
@@ -126,6 +126,7 @@ export class BlazeFaceLandmarkPipeline implements FaceDetector {
       const refined = await this.landmarker.detect(alignedImage);
       timings.preprocessingMs += refined.timings.preprocessingMs;
       timings.inferenceMs += refined.timings.inferenceMs;
+      timings.landmarkInferenceMs += refined.timings.inferenceMs;
 
       const decodeStartedAt = performance.now();
       const bestRefinement = refined.faces.reduce<DetectedFace | null>(

@@ -11,6 +11,7 @@ export type DetectorTimings = {
   preprocessingMs: number;
   inferenceMs: number;
   decodingMs: number;
+  landmarkInferenceMs?: number;
 };
 
 export interface FaceDetector {

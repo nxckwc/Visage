@@ -181,7 +181,7 @@ describe("BlazeFace to MediaPipe landmark pipeline", () => {
 
     expect(landmarker.detect).not.toHaveBeenCalled();
     expect(result.faces).toEqual([]);
-    expect(result.timings).toEqual(timing(1, 2, 3));
+    expect(result.timings).toEqual({ ...timing(1, 2, 3), landmarkInferenceMs: 0 });
     await pipeline.dispose();
   });
 });
